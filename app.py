@@ -7,7 +7,7 @@ import pandas as pd
 import shutil
 import tempfile
 
-# --- 1. System Path and Module Mapping ---
+# --- 1. 环境初始化与模块映射 ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -36,6 +36,7 @@ try:
 except Exception as e:
     pass
 
+# --- 2. 核心算法逻辑 ---
 @st.cache_resource
 def get_yolo_model(model_name):
     path = os.path.join("models", model_name)
@@ -47,90 +48,140 @@ def run_feature_analysis(img_bgr, algo_type):
     h, w = img_bgr.shape[:2]
     canvas = img_bgr.copy()
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # 9x9 参考网格
+    for i in range(1, 9):
+        cv2.line(canvas, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 1)
+        cv2.line(canvas, (int(i * w / 9), 0), (int(i * w / 9), h), (0, 255, 0), 1)
+
     if algo_type == "Algorithm 1":
         feat_engine = cv2.SIFT_create(nfeatures=2000)
+        pt_color = (255, 0, 0)
     else:
         feat_engine = cv2.ORB_create(nfeatures=5000)
+        pt_color = (0, 0, 255)
+
     kp, _ = feat_engine.detectAndCompute(gray, None)
     if kp:
-        canvas = cv2.drawKeypoints(canvas, kp, None, color=(0, 255, 0))
+        canvas = cv2.drawKeypoints(canvas, kp, None, color=pt_color)
     return canvas, len(kp) if kp else 0
 
-# --- UI Layout ---
-st.title("PCB Batch Inspection System")
+# --- 3. UI 界面 ---
+st.title("PCB Intelligent Inspection Platform")
 st.markdown("---")
 
-# 支持多文件上传
-uploaded_files = st.file_uploader("Upload Batch PCB Images (up to 500)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+# 侧边栏保持原样：用于单张图检测配置
+st.sidebar.header("Mode 1: Single Image Configuration")
+ds_select = st.sidebar.selectbox("Test Dataset", ["Dataset 1", "Dataset 2"])
+ds_code = "ds1" if ds_select == "Dataset 1" else "ds2"
 
-if uploaded_files:
-    st.info(f"Loaded {len(uploaded_files)} images. Ready for batch processing.")
+model_ui = st.sidebar.radio("Inspection Model", ["Model A", "Model B"])
+model_code = "se" if model_ui == "Model A" else "cbam"
+target_file = f"{ds_code}_{model_code}.pt"
+
+algo_ui = st.sidebar.radio("Analysis Mode", ["Algorithm 1", "Algorithm 2"])
+conf_threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.25)
+
+# --- 功能模式切换 ---
+tabs = st.tabs(["Single Image Inspection", "Batch Processing (400+ Images)"])
+
+# --- 选项卡 1: 原有的单图上传检测功能 (完全保留) ---
+with tabs[0]:
+    uploaded_file = st.file_uploader("Upload Single PCB Image", type=["jpg", "png", "jpeg"], key="single")
+    if uploaded_file:
+        base_file_name = os.path.splitext(uploaded_file.name)[0]
+        bytes_data = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        raw_img = cv2.imdecode(bytes_data, 1)
+
+        col_view, col_rep = st.columns([3, 2])
+        with col_view:
+            if st.button("Start Analysis", type="primary"):
+                yolo_model = get_yolo_model(target_file)
+                if yolo_model:
+                    res = yolo_model.predict(raw_img, conf=conf_threshold)
+                    render_img = res[0].plot()
+                    final_img, total_kp = run_feature_analysis(render_img, algo_ui)
+                    st.image(cv2.cvtColor(final_img, cv2.COLOR_BGR2RGB), caption=f"{model_ui} + {algo_ui}", use_container_width=True)
+
+                    # 报告数据记录
+                    data_rows = []
+                    class_counts = {}
+                    for box in res[0].boxes:
+                        label = res[0].names[int(box.cls[0])]
+                        data_rows.append([model_ui, label, f"{float(box.conf[0]):.2%}", "Verified"])
+                        class_counts[label] = class_counts.get(label, 0) + 1
+                    data_rows.append([algo_ui, "Feature Points", f"{total_kp} pts", "Extracted"])
+                    report_df = pd.DataFrame(data_rows, columns=["Method", "Target", "Value", "Status"])
+
+                    with col_rep:
+                        st.subheader("Summary")
+                        st.dataframe(report_df, hide_index=True)
+                        st.subheader("Counts")
+                        st.table(pd.DataFrame([{"Component": k, "Quantity": v} for k, v in class_counts.items()]))
+                        
+                        # 单张导出的三级目录逻辑
+                        folder_name = f"{model_ui} and {algo_ui}"
+                        img_dir = os.path.join(folder_name, base_file_name)
+                        os.makedirs(img_dir, exist_ok=True)
+                        cv2.imwrite(os.path.join(img_dir, f"{base_file_name}_annotated.jpg"), final_img)
+                        report_df.to_csv(os.path.join(img_dir, f"{base_file_name}_report.csv"), index=False)
+                        st.success(f"Archived in {folder_name}/{base_file_name}")
+
+# --- 选项卡 2: 新增的批量检测功能 ---
+with tabs[1]:
+    st.header("Batch Cross-Analysis Mode")
+    st.write("This mode will process all images using ALL 4 combinations (Model A/B x Algo 1/2).")
+    batch_files = st.file_uploader("Upload all 400+ images", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="batch")
     
-    if st.button("Generate Full Cross-Analysis Report", type="primary"):
-        # 创建临时导出根目录
-        export_root = "Batch_Export_Results"
-        if os.path.exists(export_root):
-            shutil.rmtree(export_root)
-        os.makedirs(export_root)
-        
-        combinations = [
-            ("Model A", "ds1_se.pt", "Algorithm 1"),
-            ("Model A", "ds1_se.pt", "Algorithm 2"),
-            ("Model B", "ds1_cbam.pt", "Algorithm 1"),
-            ("Model B", "ds1_cbam.pt", "Algorithm 2")
-        ]
-        
-        progress_bar = st.progress(0)
-        total_steps = len(combinations) * len(uploaded_files)
-        current_step = 0
-        
-        for m_name, m_file, a_name in combinations:
-            # 第一级目录：Model A and Algorithm 1
-            combo_path = os.path.join(export_root, f"{m_name} and {a_name}")
-            os.makedirs(combo_path, exist_ok=True)
+    if batch_files:
+        if st.button("Execute Full Batch & Export 3-Level Zip", type="secondary"):
+            export_root = "Full_Batch_Results"
+            if os.path.exists(export_root): shutil.rmtree(export_root)
+            os.makedirs(export_root)
             
-            model = get_yolo_model(m_file)
+            # 定义 4 种必须跑的组合
+            combos = [
+                ("Model A", f"{ds_code}_se.pt", "Algorithm 1"),
+                ("Model A", f"{ds_code}_se.pt", "Algorithm 2"),
+                ("Model B", f"{ds_code}_cbam.pt", "Algorithm 1"),
+                ("Model B", f"{ds_code}_cbam.pt", "Algorithm 2")
+            ]
             
-            for up_file in uploaded_files:
-                # 获取文件名（二级目录名）
-                base_name = os.path.splitext(up_file.name)[0]
-                img_dir = os.path.join(combo_path, base_name)
-                os.makedirs(img_dir, exist_ok=True)
+            progress = st.progress(0)
+            total = len(combos) * len(batch_files)
+            count = 0
+            
+            for m_ui, m_file, a_ui in combos:
+                # 第一级：模型与算法
+                l1_path = os.path.join(export_root, f"{m_ui} and {a_ui}")
+                model = get_yolo_model(m_file)
                 
-                # 处理图片
-                file_bytes = np.asarray(bytearray(up_file.read()), dtype=np.uint8)
-                up_file.seek(0) # 重置文件指针供下次读取
-                img = cv2.imdecode(file_bytes, 1)
-                
-                # 推理与标注
-                res = model.predict(img, conf=0.25, verbose=False)
-                anno_img = res[0].plot()
-                final_img, total_kp = run_feature_analysis(anno_img, a_name)
-                
-                # 保存三级文件：标注图片
-                img_save_name = f"{base_name}_{m_name.replace(' ','')}_{a_name.replace(' ','')}.jpg"
-                cv2.imwrite(os.path.join(img_dir, img_save_name), final_img)
-                
-                # 生成并保存三级文件：CSV
-                data = []
-                for box in res[0].boxes:
-                    data.append({
-                        "Method": m_name,
-                        "Target": res[0].names[int(box.cls[0])],
-                        "Confidence": f"{float(box.conf[0]):.2%}",
-                        "Original_File": up_file.name,
-                        "Algorithm_Info": a_name
-                    })
-                data.append({"Method": a_name, "Target": "Keypoints", "Confidence": f"{total_kp}", "Original_File": up_file.name, "Algorithm_Info": m_name})
-                
-                csv_save_name = f"{base_name}_report.csv"
-                pd.DataFrame(data).to_csv(os.path.join(img_dir, csv_save_name), index=False)
-                
-                current_step += 1
-                progress_bar.progress(current_step / total_steps)
+                for b_file in batch_files:
+                    # 第二级：图片名称
+                    img_name = os.path.splitext(b_file.name)[0]
+                    l2_path = os.path.join(l1_path, img_name)
+                    os.makedirs(l2_path, exist_ok=True)
+                    
+                    # 运行处理
+                    f_bytes = np.asarray(bytearray(b_file.read()), dtype=np.uint8)
+                    b_file.seek(0)
+                    img = cv2.imdecode(f_bytes, 1)
+                    
+                    res = model.predict(img, conf=conf_threshold, verbose=False)
+                    anno = res[0].plot()
+                    final, kp_num = run_feature_analysis(anno, a_ui)
+                    
+                    # 第三级：文件输出
+                    cv2.imwrite(os.path.join(l2_path, f"{img_name}_annotated.jpg"), final)
+                    pd.DataFrame([{"File": b_file.name, "Model": m_ui, "Algo": a_ui, "KP": kp_num}]).to_csv(os.path.join(l2_path, "data.csv"), index=False)
+                    
+                    count += 1
+                    progress.progress(count / total)
 
-        # 打包下载
-        shutil.make_archive("Full_Inspection_Export", 'zip', export_root)
-        with open("Full_Inspection_Export.zip", "rb") as f:
-            st.download_button("Download Full Batch Pack (ZIP)", f, file_name="Full_Inspection_Export.zip")
-        st.success("Batch processing completed! All combinations exported.")
+            shutil.make_archive("Full_Export", 'zip', export_root)
+            with open("Full_Export.zip", "rb") as f:
+                st.download_button("Download All Combinations (ZIP)", f, file_name="Full_Export.zip")
+            st.success("Batch Processing Finished.")
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"System Ready | Mode: {ds_code}")
