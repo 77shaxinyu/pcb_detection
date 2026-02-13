@@ -96,10 +96,19 @@ with tabs[0]:
                     counts = {}
                     for box in res[0].boxes:
                         label = res[0].names[int(box.cls[0])]
-                        report_data.append([model_ui, label, f"{float(box.conf[0]):.2%}", "Verified"])
+                        # --- 修改部分：提取坐标 ---
+                        xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                        coord_str = f"[{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]"
+                        
+                        # 插入坐标到第三列 (Target 和 Value 之间)
+                        report_data.append([model_ui, label, coord_str, f"{float(box.conf[0]):.2%}", "Verified"])
                         counts[label] = counts.get(label, 0) + 1
-                    report_data.append([algo_ui, "Feature Points", f"{kp_n} pts", "Extracted"])
-                    st.dataframe(pd.DataFrame(report_data, columns=["Method", "Target", "Value", "Status"]), hide_index=True)
+                    
+                    # 算法特征点行保持格式一致，坐标位填 "N/A"
+                    report_data.append([algo_ui, "Feature Points", "N/A", f"{kp_n} pts", "Extracted"])
+                    
+                    # 更新 DataFrame 列名，加入 Coordinates
+                    st.dataframe(pd.DataFrame(report_data, columns=["Method", "Target", "Coordinates", "Value", "Status"]), hide_index=True)
                     
                     st.subheader("Component Statistics")
                     if counts:
