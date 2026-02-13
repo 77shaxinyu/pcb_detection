@@ -80,7 +80,7 @@ def run_feature_analysis(img_bgr, algo_type):
     return canvas, len(kp) if kp else 0
 
 # --- 4. 界面展示布局 ---
-st.title("🛡️ PCB Defect Detection & Feature Analysis Platform")
+st.title("PCB Defect Detection & Feature Analysis Platform")
 st.markdown("---")
 
 # 侧边栏配置面板
@@ -129,7 +129,7 @@ if uploaded_file:
 
                 # --- 5. 数据报告区 ---
                 with col_rep:
-                    st.subheader("📋 Detection Summary")
+                    st.subheader("Detection Summary")
                     data_rows = []
                     
                     # 遍历 YOLO 找到的所有缺陷
