@@ -1,107 +1,81 @@
-import streamlit as st
+import os
 import pandas as pd
 import numpy as np
 from ultralytics import YOLO
-from PIL import Image
-import cv2
-import os
 
-# 页面配置
-st.set_page_config(page_title="PCB缺陷检测系统", layout="wide")
-
-# 加载模型
-@st.cache_resource
-def load_yolo_models():
-    # 路径根据您的电脑实际情况配置
-    base_path = r"C:\Users\donghaoran\PycharmProjects\set2\runs\detect"
-    model_paths = {
-        "Dataset1_SE": os.path.join(base_path, "pcb_yolo12_se_dataset1", "weights", "best.pt"),
-        "Dataset1_CBAM": os.path.join(base_path, "pcb_yolo12_cbam_dataset1", "weights", "best.pt"),
-        "Dataset2_SE": os.path.join(base_path, "pcb_yolo12_se_dataset2", "weights", "best.pt"),
-        "Dataset2_CBAM": os.path.join(base_path, "pcb_yolo12_cbam_dataset2", "weights", "best.pt")
-    }
+def get_detailed_metrics(model_path, model_label, yaml_name):
+    if not os.path.exists(model_path):
+        return []
     
-    loaded_models = {}
-    for name, path in model_paths.items():
-        if os.path.exists(path):
-            loaded_models[name] = YOLO(path)
-    return loaded_models
-
-def main():
-    st.title("PCB智能检测分析系统")
-
-    # 获取模型
-    models = load_yolo_models()
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    yaml_path = os.path.join(current_dir, yaml_name)
     
-    if not models:
-        st.error("错误：未找到模型文件，请检查存放路径。")
-        return
-
-    # 侧边栏
-    st.sidebar.header("控制面板")
-    selected_name = st.sidebar.selectbox("选择模型", list(models.keys()))
-    conf_val = st.sidebar.slider("置信度阈值", 0.1, 1.0, 0.25)
-    
-    # 上传文件
-    uploaded_file = st.file_uploader("上传PCB图像", type=["jpg", "png", "jpeg"])
-
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        img_array = np.array(image)
+    try:
+        model = YOLO(model_path)
+        # cache=False 确保 Dataset2 重新扫描以发现所有 4 种缺陷
+        results = model.val(data=yaml_path, plots=False, verbose=False, workers=0, cache=False)
         
-        # 布局分栏
-        col_left, col_right = st.columns([6, 4])
+        class_metrics = []
+        names = model.names 
+        
+        # 获取当前验证集中存在的类别索引
+        # 根据报错信息，新版使用 ap_class_index
+        present_classes = results.box.ap_class_index
+        
+        for i, class_idx in enumerate(present_classes):
+            name = names.get(int(class_idx), f"class_{class_idx}")
+            
+            # 使用官方推荐的 class_result 方法提取各项指标
+            # 返回顺序为: (precision, recall, ap50, ap)
+            p, r, ap50, _ = results.box.class_result(i)
+            
+            p = float(p)
+            r = float(r)
+            m50 = float(ap50)
+            f1 = 2 * (p * r) / (p + r) if (p + r) > 0 else 0
+            
+            class_metrics.append({
+                "Model": model_label,
+                "Defect_Type": name,
+                "mAP50": round(m50, 4),
+                "Precision": round(p, 4),
+                "Recall": round(r, 4),
+                "F1_Score": round(f1, 4)
+            })
+        return class_metrics
+    except Exception as e:
+        print(f"处理模型 {model_label} 时出错: {e}")
+        return []
 
-        with col_left:
-            st.subheader("检测结果图")
-            if st.button("开始分析"):
-                model = models[selected_name]
-                results = model.predict(img_array, conf=conf_val)
-                result = results[0]
+if __name__ == '__main__':
+    base_path = r"C:\Users\donghaoran\PycharmProjects\set2\runs\detect"
+    
+    model_configs = {
+        "Dataset1_SE": (os.path.join(base_path, "pcb_yolo12_se_dataset1", "weights", "best.pt"), "dataset1_data.yaml"),
+        "Dataset1_CBAM": (os.path.join(base_path, "pcb_yolo12_cbam_dataset1", "weights", "best.pt"), "dataset1_data.yaml"),
+        "Dataset2_SE": (os.path.join(base_path, "pcb_yolo12_se_dataset2", "weights", "best.pt"), "dataset2_data.yaml"),
+        "Dataset2_CBAM": (os.path.join(base_path, "pcb_yolo12_cbam_dataset2", "weights", "best.pt"), "dataset2_data.yaml")
+    }
 
-                # 绘制带标签的图并修正颜色
-                annotated_frame = result.plot()
-                annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                st.image(annotated_frame, use_container_width=True)
+    print("正在提取各模型分缺陷指标...")
+    all_data = []
+    for label, (path, yaml_file) in model_configs.items():
+        print(f"分析中: {label}...")
+        all_data.extend(get_detailed_metrics(path, label, yaml_file))
 
-                # 提取数据
-                table_list = []
-                if result.boxes:
-                    for box in result.boxes:
-                        # 类别和置信度
-                        cls_id = int(box.cls[0])
-                        label = result.names[cls_id]
-                        conf = float(box.conf[0])
-                        
-                        # 提取坐标并转为整数
-                        xyxy = box.xyxy[0].cpu().numpy().astype(int)
-                        coord_str = f"[{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]"
-
-                        # 组织字典，确保坐标列在第三位
-                        table_list.append({
-                            "Method": "YOLO12",
-                            "Target": label,
-                            "Coordinates": coord_str,
-                            "Value": f"{conf:.2%}",
-                            "Status": "Verified"
-                        })
-
-                with col_right:
-                    st.subheader("检测汇总表")
-                    if table_list:
-                        df = pd.DataFrame(table_list)
-                        # 网页展示表格
-                        st.table(df)
-
-                        # 类别统计
-                        st.subheader("成分统计")
-                        stats = df["Target"].value_counts().reset_index()
-                        stats.columns = ["Component", "Quantity"]
-                        st.table(stats)
-                    else:
-                        st.write("未检测到缺陷。")
-            else:
-                st.image(image, caption="原始预览", use_container_width=True)
-
-if __name__ == "__main__":
-    main()
+    if all_data:
+        df = pd.DataFrame(all_data)
+        
+        # 终端展示
+        print("\n" + "="*75)
+        print(f"{'Model':<15} {'Defect Type':<20} {'mAP50':<8} {'P':<8} {'R':<8} {'F1':<8}")
+        print("-" * 75)
+        for _, row in df.iterrows():
+            print(f"{row['Model']:<15} {row['Defect_Type']:<20} {row['mAP50']:<8.4f} {row['Precision']:<8.4f} {row['Recall']:<8.4f} {row['F1_Score']:<8.4f}")
+        print("="*75)
+        
+        # 导出
+        df.to_csv("final_pcb_class_metrics.csv", index=False, encoding='utf-8-sig')
+        print(f"\n汇总表已保存: {os.path.abspath('final_pcb_class_metrics.csv')}")
+    else:
+        print("未提取到任何数据，请检查模型文件路径是否正确。")
