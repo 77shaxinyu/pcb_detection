@@ -6,101 +6,102 @@ from PIL import Image
 import cv2
 import os
 
-# 设置页面配置
-st.set_page_config(page_title="PCB Defect Detection System", layout="wide")
+# 页面配置
+st.set_page_config(page_title="PCB缺陷检测系统", layout="wide")
 
-# --- 1. 初始化模型 ---
+# 加载模型
 @st.cache_resource
-def load_models():
-    # 根据你的目录结构配置模型路径
+def load_yolo_models():
+    # 路径根据您的电脑实际情况配置
     base_path = r"C:\Users\donghaoran\PycharmProjects\set2\runs\detect"
-    models = {
-        "YOLO12-SE": YOLO(os.path.join(base_path, "pcb_yolo12_se_dataset2", "weights", "best.pt")),
-        "YOLO12-CBAM": YOLO(os.path.join(base_path, "pcb_yolo12_cbam_dataset2", "weights", "best.pt"))
+    model_paths = {
+        "Dataset1_SE": os.path.join(base_path, "pcb_yolo12_se_dataset1", "weights", "best.pt"),
+        "Dataset1_CBAM": os.path.join(base_path, "pcb_yolo12_cbam_dataset1", "weights", "best.pt"),
+        "Dataset2_SE": os.path.join(base_path, "pcb_yolo12_se_dataset2", "weights", "best.pt"),
+        "Dataset2_CBAM": os.path.join(base_path, "pcb_yolo12_cbam_dataset2", "weights", "best.pt")
     }
-    return models
+    
+    loaded_models = {}
+    for name, path in model_paths.items():
+        if os.path.exists(path):
+            loaded_models[name] = YOLO(path)
+    return loaded_models
 
-# --- 2. 检测逻辑 ---
-def run_detection(image, model):
-    # 将 PIL 图片转为 OpenCV 格式供模型使用
-    img_array = np.array(image)
-    
-    # 执行预测
-    results = model.predict(img_array, conf=0.25)
-    result = results[0]
-    
-    # 绘制检测结果图
-    annotated_img = result.plot()
-    
-    # 提取表格数据
-    table_data = []
-    if result.boxes:
-        for box in result.boxes:
-            # 类别 ID 和名称
-            cls_id = int(box.cls[0])
-            label = result.names[cls_id]
-            # 置信度
-            conf = float(box.conf[0])
-            # 坐标提取 (x1, y1, x2, y2)
-            xyxy = box.xyxy[0].cpu().numpy().astype(int)
-            coord_str = f"[{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]"
-            
-            # 构造表格行：坐标严格放在第三列
-            table_data.append({
-                "Method": "YOLO12",
-                "Target": label,
-                "Coordinates": coord_str, # 第三行/列
-                "Confidence": f"{conf:.2%}",
-                "Status": "Verified"
-            })
-            
-    return annotated_img, pd.DataFrame(table_data)
-
-# --- 3. 网页 UI 布局 ---
 def main():
-    st.title("PCB Defect Detection System")
-    st.markdown("---")
+    st.title("PCB智能检测分析系统")
 
-    # 侧边栏：模型选择
-    st.sidebar.header("Settings")
-    model_dict = load_models()
-    selected_model_name = st.sidebar.selectbox("Select Model", list(model_dict.keys()))
-    selected_model = model_dict[selected_model_name]
+    # 获取模型
+    models = load_yolo_models()
+    
+    if not models:
+        st.error("错误：未找到模型文件，请检查存放路径。")
+        return
 
-    # 上传部分
-    uploaded_file = st.file_uploader("Upload PCB Image", type=["jpg", "png", "jpeg"])
+    # 侧边栏
+    st.sidebar.header("控制面板")
+    selected_name = st.sidebar.selectbox("选择模型", list(models.keys()))
+    conf_val = st.sidebar.slider("置信度阈值", 0.1, 1.0, 0.25)
+    
+    # 上传文件
+    uploaded_file = st.file_uploader("上传PCB图像", type=["jpg", "png", "jpeg"])
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file)
+        img_array = np.array(image)
         
-        # 分为左右两栏展示
-        col1, col2 = st.columns([6, 4])
-        
-        with col1:
-            st.subheader("Visualized Result")
-            if st.button("Start Analysis"):
-                # 运行检测
-                annotated_img, df_results = run_detection(image, selected_model)
-                
-                # 显示标注后的图片 (转回 RGB)
-                st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), use_column_width=True)
-                
-                with col2:
-                    st.subheader("Detection Summary")
-                    if not df_results.empty:
-                        # 展示带坐标的表格
-                        st.table(df_results) 
+        # 布局分栏
+        col_left, col_right = st.columns([6, 4])
+
+        with col_left:
+            st.subheader("检测结果图")
+            if st.button("开始分析"):
+                model = models[selected_name]
+                results = model.predict(img_array, conf=conf_val)
+                result = results[0]
+
+                # 绘制带标签的图并修正颜色
+                annotated_frame = result.plot()
+                annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                st.image(annotated_frame, use_container_width=True)
+
+                # 提取数据
+                table_list = []
+                if result.boxes:
+                    for box in result.boxes:
+                        # 类别和置信度
+                        cls_id = int(box.cls[0])
+                        label = result.names[cls_id]
+                        conf = float(box.conf[0])
                         
-                        # 统计部分
-                        st.subheader("Component Statistics")
-                        stats = df_results['Target'].value_counts().reset_index()
-                        stats.columns = ['Component', 'Quantity']
+                        # 提取坐标并转为整数
+                        xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                        coord_str = f"[{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]"
+
+                        # 组织字典，确保坐标列在第三位
+                        table_list.append({
+                            "Method": "YOLO12",
+                            "Target": label,
+                            "Coordinates": coord_str,
+                            "Value": f"{conf:.2%}",
+                            "Status": "Verified"
+                        })
+
+                with col_right:
+                    st.subheader("检测汇总表")
+                    if table_list:
+                        df = pd.DataFrame(table_list)
+                        # 网页展示表格
+                        st.table(df)
+
+                        # 类别统计
+                        st.subheader("成分统计")
+                        stats = df["Target"].value_counts().reset_index()
+                        stats.columns = ["Component", "Quantity"]
                         st.table(stats)
                     else:
-                        st.write("No defects detected.")
-        else:
-            # 未分析前先预览原图
-            st.image(image, caption="Original Image Preview", width=500)
+                        st.write("未检测到缺陷。")
+            else:
+                st.image(image, caption="原始预览", use_container_width=True)
 
 if __name__ == "__main__":
     main()
