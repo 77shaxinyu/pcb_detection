@@ -105,10 +105,11 @@ if uploaded_file:
                     st.subheader("Detection Summary")
                     data_rows = []
                     
+                    # --- 修改点：这里直接根据选择的 Model A/B 显示内容 ---
                     for box in res[0].boxes:
                         label = res[0].names[int(box.cls[0])]
                         prob = f"{float(box.conf[0]):.2%}"
-                        data_rows.append(["AI Engine", label, prob, "Verified"])
+                        data_rows.append([model_ui, label, prob, "Verified"])
                     
                     data_rows.append([algo_ui, "Feature Points", f"{total_kp} pts", "Extracted"])
                     
