@@ -4,7 +4,9 @@ import numpy as np
 import os
 import sys
 import pandas as pd
+import shutil
 
+# --- 1. System Path and Module Mapping ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -46,7 +48,6 @@ def run_feature_analysis(img_bgr, algo_type):
     h, w = img_bgr.shape[:2]
     canvas = img_bgr.copy()
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
     for i in range(1, 9):
         cv2.line(canvas, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 1)
         cv2.line(canvas, (int(i * w / 9), 0), (int(i * w / 9), h), (0, 255, 0), 1)
@@ -61,9 +62,9 @@ def run_feature_analysis(img_bgr, algo_type):
     kp, des = feat_engine.detectAndCompute(gray, None)
     if kp:
         canvas = cv2.drawKeypoints(canvas, kp, None, color=pt_color)
-
     return canvas, len(kp) if kp else 0
 
+# --- UI Layout ---
 st.title("PCB Intelligent Inspection Platform")
 st.markdown("---")
 
@@ -75,14 +76,15 @@ model_ui = st.sidebar.radio("Inspection Model", ["Model A", "Model B"])
 model_code = "se" if model_ui == "Model A" else "cbam"
 
 target_file = f"{ds_code}_{model_code}.pt"
-
 algo_ui = st.sidebar.radio("Analysis Mode", ["Algorithm 1", "Algorithm 2"])
-
 conf_threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.25)
 
 uploaded_file = st.file_uploader("Upload PCB Image", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
+    # 获取原始文件名（不含后缀）
+    base_file_name = os.path.splitext(uploaded_file.name)[0]
+    
     bytes_data = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     raw_img = cv2.imdecode(bytes_data, 1)
 
@@ -98,24 +100,61 @@ if uploaded_file:
                 final_img, total_kp = run_feature_analysis(render_img, algo_ui)
 
                 st.image(cv2.cvtColor(final_img, cv2.COLOR_BGR2RGB), 
-                         caption=f"Process: {model_ui} and {algo_ui}", 
-                         use_container_width=True)
+                         caption=f"Process: {model_ui} and {algo_ui}", use_container_width=True)
+
+                # Data processing
+                data_rows = []
+                class_counts = {}
+                for box in res[0].boxes:
+                    label = res[0].names[int(box.cls[0])]
+                    prob = f"{float(box.conf[0]):.2%}"
+                    # 将模型和算法信息直接写入每一行数据
+                    data_rows.append([model_ui, label, prob, "Verified", base_file_name, algo_ui])
+                    class_counts[label] = class_counts.get(label, 0) + 1
+                
+                data_rows.append([algo_ui, "Feature Points", f"{total_kp} pts", "Extracted", base_file_name, model_ui])
+                
+                # 创建带溯源信息的报表
+                report_df = pd.DataFrame(data_rows, columns=["Method", "Target", "Value", "Status", "Original_File", "Mode_Info"])
 
                 with col_rep:
                     st.subheader("Detection Summary")
-                    data_rows = []
-                    
-                    # --- 修改点：这里直接根据选择的 Model A/B 显示内容 ---
-                    for box in res[0].boxes:
-                        label = res[0].names[int(box.cls[0])]
-                        prob = f"{float(box.conf[0]):.2%}"
-                        data_rows.append([model_ui, label, prob, "Verified"])
-                    
-                    data_rows.append([algo_ui, "Feature Points", f"{total_kp} pts", "Extracted"])
-                    
-                    report_df = pd.DataFrame(data_rows, columns=["Method", "Target", "Value", "Status"])
                     st.dataframe(report_df, hide_index=True, use_container_width=True)
-                    st.success("Analysis Completed")
+                    
+                    st.subheader("Component Statistics")
+                    if class_counts:
+                        stats_df = pd.DataFrame([{"Component": k, "Quantity": v} for k, v in class_counts.items()])
+                        st.table(stats_df)
+
+                    # --- EXPORT LOGIC: Strict Naming Convention ---
+                    st.markdown("---")
+                    # 1. 文件夹名称: Model A and Algorithm 1
+                    folder_name = f"{model_ui} and {algo_ui}"
+                    if not os.path.exists(folder_name):
+                        os.makedirs(folder_name)
+                    
+                    # 2. 图片名称: [原图名]_[模型]_[算法].jpg
+                    clean_model_name = model_ui.replace(" ", "")
+                    clean_algo_name = algo_ui.replace(" ", "")
+                    out_img_name = f"{base_file_name}_{clean_model_name}_{clean_algo_name}.jpg"
+                    cv2.imwrite(os.path.join(folder_name, out_img_name), final_img)
+                    
+                    # 3. CSV名称: [原图名]_[模型]_[算法].csv
+                    out_csv_name = f"{base_file_name}_{clean_model_name}_{clean_algo_name}.csv"
+                    report_df.to_csv(os.path.join(folder_name, out_csv_name), index=False)
+                    
+                    # 打包 ZIP
+                    shutil.make_archive(folder_name, 'zip', folder_name)
+                    
+                    st.info(f"Exported to: {folder_name}")
+                    with open(f"{folder_name}.zip", "rb") as fp:
+                        st.download_button(
+                            label="Download Output Pack",
+                            data=fp,
+                            file_name=f"{folder_name}.zip",
+                            mime="application/zip"
+                        )
+                    st.success("Files named and saved successfully")
             else:
                 st.error("Model Loading Failed")
         else:
