@@ -5,6 +5,7 @@ import os
 import sys
 import pandas as pd
 import shutil
+import tempfile
 
 # --- 1. System Path and Module Mapping ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +36,6 @@ try:
 except Exception as e:
     pass
 
-st.set_page_config(page_title="PCB Inspection System", layout="wide")
-
 @st.cache_resource
 def get_yolo_model(model_name):
     path = os.path.join("models", model_name)
@@ -48,117 +47,90 @@ def run_feature_analysis(img_bgr, algo_type):
     h, w = img_bgr.shape[:2]
     canvas = img_bgr.copy()
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    for i in range(1, 9):
-        cv2.line(canvas, (0, int(i * h / 9)), (w, int(i * h / 9)), (0, 255, 0), 1)
-        cv2.line(canvas, (int(i * w / 9), 0), (int(i * w / 9), h), (0, 255, 0), 1)
-
     if algo_type == "Algorithm 1":
         feat_engine = cv2.SIFT_create(nfeatures=2000)
-        pt_color = (255, 0, 0)
     else:
         feat_engine = cv2.ORB_create(nfeatures=5000)
-        pt_color = (0, 0, 255)
-
-    kp, des = feat_engine.detectAndCompute(gray, None)
+    kp, _ = feat_engine.detectAndCompute(gray, None)
     if kp:
-        canvas = cv2.drawKeypoints(canvas, kp, None, color=pt_color)
+        canvas = cv2.drawKeypoints(canvas, kp, None, color=(0, 255, 0))
     return canvas, len(kp) if kp else 0
 
 # --- UI Layout ---
-st.title("PCB Intelligent Inspection Platform")
+st.title("PCB Batch Inspection System")
 st.markdown("---")
 
-st.sidebar.header("Configuration Panel")
-ds_select = st.sidebar.selectbox("Test Dataset", ["Dataset 1", "Dataset 2"])
-ds_code = "ds1" if ds_select == "Dataset 1" else "ds2"
+# 支持多文件上传
+uploaded_files = st.file_uploader("Upload Batch PCB Images (up to 500)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
-model_ui = st.sidebar.radio("Inspection Model", ["Model A", "Model B"])
-model_code = "se" if model_ui == "Model A" else "cbam"
-
-target_file = f"{ds_code}_{model_code}.pt"
-algo_ui = st.sidebar.radio("Analysis Mode", ["Algorithm 1", "Algorithm 2"])
-conf_threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.25)
-
-uploaded_file = st.file_uploader("Upload PCB Image", type=["jpg", "png", "jpeg"])
-
-if uploaded_file:
-    # 获取原始文件名（不含后缀）
-    base_file_name = os.path.splitext(uploaded_file.name)[0]
+if uploaded_files:
+    st.info(f"Loaded {len(uploaded_files)} images. Ready for batch processing.")
     
-    bytes_data = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    raw_img = cv2.imdecode(bytes_data, 1)
-
-    col_view, col_rep = st.columns([3, 2])
-
-    with col_view:
-        if st.button("Start Analysis", type="primary"):
-            yolo_model = get_yolo_model(target_file)
+    if st.button("Generate Full Cross-Analysis Report", type="primary"):
+        # 创建临时导出根目录
+        export_root = "Batch_Export_Results"
+        if os.path.exists(export_root):
+            shutil.rmtree(export_root)
+        os.makedirs(export_root)
+        
+        combinations = [
+            ("Model A", "ds1_se.pt", "Algorithm 1"),
+            ("Model A", "ds1_se.pt", "Algorithm 2"),
+            ("Model B", "ds1_cbam.pt", "Algorithm 1"),
+            ("Model B", "ds1_cbam.pt", "Algorithm 2")
+        ]
+        
+        progress_bar = st.progress(0)
+        total_steps = len(combinations) * len(uploaded_files)
+        current_step = 0
+        
+        for m_name, m_file, a_name in combinations:
+            # 第一级目录：Model A and Algorithm 1
+            combo_path = os.path.join(export_root, f"{m_name} and {a_name}")
+            os.makedirs(combo_path, exist_ok=True)
             
-            if yolo_model:
-                res = yolo_model.predict(raw_img, conf=conf_threshold)
-                render_img = res[0].plot()
-                final_img, total_kp = run_feature_analysis(render_img, algo_ui)
-
-                st.image(cv2.cvtColor(final_img, cv2.COLOR_BGR2RGB), 
-                         caption=f"Process: {model_ui} and {algo_ui}", use_container_width=True)
-
-                # Data processing
-                data_rows = []
-                class_counts = {}
+            model = get_yolo_model(m_file)
+            
+            for up_file in uploaded_files:
+                # 获取文件名（二级目录名）
+                base_name = os.path.splitext(up_file.name)[0]
+                img_dir = os.path.join(combo_path, base_name)
+                os.makedirs(img_dir, exist_ok=True)
+                
+                # 处理图片
+                file_bytes = np.asarray(bytearray(up_file.read()), dtype=np.uint8)
+                up_file.seek(0) # 重置文件指针供下次读取
+                img = cv2.imdecode(file_bytes, 1)
+                
+                # 推理与标注
+                res = model.predict(img, conf=0.25, verbose=False)
+                anno_img = res[0].plot()
+                final_img, total_kp = run_feature_analysis(anno_img, a_name)
+                
+                # 保存三级文件：标注图片
+                img_save_name = f"{base_name}_{m_name.replace(' ','')}_{a_name.replace(' ','')}.jpg"
+                cv2.imwrite(os.path.join(img_dir, img_save_name), final_img)
+                
+                # 生成并保存三级文件：CSV
+                data = []
                 for box in res[0].boxes:
-                    label = res[0].names[int(box.cls[0])]
-                    prob = f"{float(box.conf[0]):.2%}"
-                    # 将模型和算法信息直接写入每一行数据
-                    data_rows.append([model_ui, label, prob, "Verified", base_file_name, algo_ui])
-                    class_counts[label] = class_counts.get(label, 0) + 1
+                    data.append({
+                        "Method": m_name,
+                        "Target": res[0].names[int(box.cls[0])],
+                        "Confidence": f"{float(box.conf[0]):.2%}",
+                        "Original_File": up_file.name,
+                        "Algorithm_Info": a_name
+                    })
+                data.append({"Method": a_name, "Target": "Keypoints", "Confidence": f"{total_kp}", "Original_File": up_file.name, "Algorithm_Info": m_name})
                 
-                data_rows.append([algo_ui, "Feature Points", f"{total_kp} pts", "Extracted", base_file_name, model_ui])
+                csv_save_name = f"{base_name}_report.csv"
+                pd.DataFrame(data).to_csv(os.path.join(img_dir, csv_save_name), index=False)
                 
-                # 创建带溯源信息的报表
-                report_df = pd.DataFrame(data_rows, columns=["Method", "Target", "Value", "Status", "Original_File", "Mode_Info"])
+                current_step += 1
+                progress_bar.progress(current_step / total_steps)
 
-                with col_rep:
-                    st.subheader("Detection Summary")
-                    st.dataframe(report_df, hide_index=True, use_container_width=True)
-                    
-                    st.subheader("Component Statistics")
-                    if class_counts:
-                        stats_df = pd.DataFrame([{"Component": k, "Quantity": v} for k, v in class_counts.items()])
-                        st.table(stats_df)
-
-                    # --- EXPORT LOGIC: Strict Naming Convention ---
-                    st.markdown("---")
-                    # 1. 文件夹名称: Model A and Algorithm 1
-                    folder_name = f"{model_ui} and {algo_ui}"
-                    if not os.path.exists(folder_name):
-                        os.makedirs(folder_name)
-                    
-                    # 2. 图片名称: [原图名]_[模型]_[算法].jpg
-                    clean_model_name = model_ui.replace(" ", "")
-                    clean_algo_name = algo_ui.replace(" ", "")
-                    out_img_name = f"{base_file_name}_{clean_model_name}_{clean_algo_name}.jpg"
-                    cv2.imwrite(os.path.join(folder_name, out_img_name), final_img)
-                    
-                    # 3. CSV名称: [原图名]_[模型]_[算法].csv
-                    out_csv_name = f"{base_file_name}_{clean_model_name}_{clean_algo_name}.csv"
-                    report_df.to_csv(os.path.join(folder_name, out_csv_name), index=False)
-                    
-                    # 打包 ZIP
-                    shutil.make_archive(folder_name, 'zip', folder_name)
-                    
-                    st.info(f"Exported to: {folder_name}")
-                    with open(f"{folder_name}.zip", "rb") as fp:
-                        st.download_button(
-                            label="Download Output Pack",
-                            data=fp,
-                            file_name=f"{folder_name}.zip",
-                            mime="application/zip"
-                        )
-                    st.success("Files named and saved successfully")
-            else:
-                st.error("Model Loading Failed")
-        else:
-            st.image(cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB), caption="Waiting for Input", use_container_width=True)
-
-st.sidebar.markdown("---")
-st.sidebar.caption(f"Backend Ready: {ds_code} and {model_code}")
+        # 打包下载
+        shutil.make_archive("Full_Inspection_Export", 'zip', export_root)
+        with open("Full_Inspection_Export.zip", "rb") as f:
+            st.download_button("Download Full Batch Pack (ZIP)", f, file_name="Full_Inspection_Export.zip")
+        st.success("Batch processing completed! All combinations exported.")
